@@ -389,10 +389,33 @@ GEMV kernel 按 `IDXBITS/ResidualBits/GROUPSIZE` 模板特化（`csrc/quant_gemv
 | VPTQ 32×16 无残差 + Hadamard（rot2 修复版） | 2.50 bit（旋转零开销吸收） | 68.18 / 64.65 / 60.61 / 65.66 / 65.66 / 60.61 / 63.64 / 65.15 / 63.64 / 64.14 / 66.67 / 65.15 / 64.65 / 65.15（**64.54**，σ=2.04） | 63.33 / 73.33 / 63.33 / 76.67 / 66.67 / 50.00（**65.56**，σ=9.35） |
 | VPTQ 32×16 无残差 + wrap Hadamard（只转专家，Q(WR)·Rᵀ） | 2.50 bit（R 折入权重，部署零改动） | 63.13 / 65.15 / 61.11 / 68.18 / 70.71 / 68.69 / 66.67 / 67.17 / 71.21 / 64.14 / 66.16 / 67.17 / 64.65 / 68.18 / 64.14（**66.43**，σ=2.78） | 73.33 / 73.33 / 80.00 / 66.67（**73.33**，σ=5.44） |
 | VPTQ 32×16 无残差 + 补采 Hessian（floor=1024，未旋转） | 2.50 bit | 67.17 / 63.64 / 69.70 / 62.63 / 66.16 / 66.16 / 65.66（**65.87**） | 73.33 / 70.00 / 80.00（**74.44**，σ=5.09） |
+| VPTQ 32×16 无残差 + dual-norm 双尺度归一化 | 2.50 bit | 63.64 / 66.16 / 68.69 / 63.64 / 64.65 / 67.68（**65.75**） | 73.33 / 70.00（**71.67**） |
 
 注：位宽为 VPTQ 预处理侧的专家表示位宽（索引+码本摊销）；各组最终部署格式统一为 attnW8A8 + moeW4A8(mxfp4)，注意力均为 W8A8，差异只在专家路径。评测期间 vLLM 被环境进程杀手 SIGKILL 十余次，各组成绩系"接力"凑齐；aime（30 题）单题 3.33 分，轮间波动天然较大（如混合组 60.00~80.00）。
 
-**结论**：① 残差贡献约 +3 分（65.30 vs 62.63）；② top20 定点修补无效（65.30 持平）——损伤是弥漫性的（k=16 码本整体粗糙），非尾部问题；③ **细块 32×16 是 VPTQ 各 tile 形态中最优**（GPQA 唯一超有残差组、aime 71.11 ≈ 基线 71.67）——局部码本密度 > 残差补偿，Tile 演进方向应继续缩小 tile 或增大 k（终局最优组 wrap 亦为 32×16 基座 + 旋转，见⑦）；④ 所有 VPTQ 预处理组 GPQA 均落后基线（73.99）约 8.5~11.4 分，k=16 级 VPTQ 预处理在该部署配方下整体为负收益，其正确形态是 Hadamard 旋转前置或端到端部署；⑤ 双尺度归一化被数据否决（通道模量 p99/中位 ≈1.1，分布本已均匀，且与 MSE 相关性 |r|≤0.17）；⑥ **Hadamard 旋转端到端未兑现权重域收益**：rot2 修复版 GPQA 64.54 vs 未旋转 65.53（−1.0，σ=2.04 内）、aime 65.56 vs 71.11（−5.6，但 aime σ=9.35 覆盖）——尽管量化侧 proxy 误差降 35-40%（§8A.4/8A.5 的 860 实例结论在全模型 33,024 矩阵复现）、重建态 MSE 同步下降，任务域成绩却持平甚至略降。教训有二：(a) 权重域 MSE 改善 ≠ 任务域收益，Hadamard 把误差"均摊"到所有通道的同时，也抹平了 H⁻¹ 误差传播原本利用的通道间误差结构（ proxy 目标的优化方向与下游任务损失并不对齐）；(b) **漏转 42 个张量的代价**——首版旋转（未修复 indexer.compressor 内层 wkv/wgate，详见 §8A.5 排障）同配方仅得 GPQA 63.13 / aime 55.56，修复后回升至 64.54/65.56：一个张量类别的旋转遗漏造成 ~1.4 GPQA + ~10 aime 的损失，V4-Flash 的 indexer 压缩注意力对输入一致性极度敏感，旋转类方案必须以"残差流全读取点"清单为准（本例共 82 个读取点张量）；⑦ **wrap-around Hadamard（只转专家）是终局答案**：Ŵ=Q(W·R)·Rᵀ（w1/w2/w3 全输入侧，w2 用独立 2048 维 R，Hessian 同步 RᵀHR），模型其余部分逐位不动——GPQA 66.43（15 轮，超未旋转组 +0.90、超 rot2 +1.89）、**aime 73.33（4 轮，超基线 71.67）**，VPTQ 各方案最优。归因链闭合：wrap（只动专家）≫ rot2（专家+注意力全转）⇒ **rot2 的损失来自注意力/残差侧旋转而非专家侧**；专家侧旋转正收益（权重域 rel-MSE −3~9% 在任务域兑现为 GPQA +0.9 / aime +2.2），且部署零开销（R 折入权重内部，推理图与未旋转一致）。实现：`run.py --wrap-rotation` / `rebuild_bf16.py --wrap-rotation` / `hadamard.py: wrap_rotation()`；带符号 Hadamard R 非对称（R⁻¹=Rᵀ），包装必须右乘 Rᵀ。评测侧教训：vLLM 起服初期（health 200 但 worker 未就绪）请求会整轮 500，编排器需真实请求预热探测；⑧ **补采线（floor=1024）收益确认且与旋转线正交**：aime **74.44**（3 轮，超基线 +2.78、超旧 Hessian 组 +3.33、超 wrap 组 +1.11）为全场最高——冷门专家 Hessian 质量是数学推理误差的主杠杆（兑现 §8A.7 的 Spearman -0.914 预测）；GPQA 65.87 与旧组 65.53 持平（补采只改 sub-1024 专家的 H，GPQA 损伤不在该路径）。两条线作用域不同（补采管 Hessian 质量、wrap 管权重几何），**补采+wrap 组合**为下一步（在补采 Hessian 上 `--wrap-rotation` 重跑量化即可）。
+**单变量对照：Hessian 数据源 / tile 尺寸 / gate 分数回退 / FP8 域归一化（2026-09-23~29）**
+
+| 组别 | Hessian 数据源 | 专家位宽 | GPQA 各轮（均值） | aime2024 各轮（均值） |
+|---|---|---|---|---|
+| attnw8a8ceil+moeW4A8（floor→ceil 修复，基线） | —（ModelSlim 直量化，无 VPTQ） | ~4.25 bit | 75.25 / 71.72 / 75.76 / 73.23（**73.99**） | 73.33 / 70.00（**71.67**） |
+| VPTQ 32×16 无残差 | RedPajama rpmix（官方 6-slice 配比） | 2.50 bit | 64.14 / 68.18 / 64.65 / 65.15（**65.53**） | 70.00 / 80.00 / 63.33（**71.11**） |
+| VPTQ 32×16 无残差 + calibR9 | **R9tau 评测对齐语料（203k token / 49 条）** | 2.50 bit | 72.73 / 70.20 / 70.71 / 73.23 / 71.72 / 73.74 / 73.23（**72.22**，σ=1.3） | 66.67 / 76.67 / 73.33（**72.22**，σ=4.2） |
+| VPTQ 32×32 无残差 + calibR9 | R9tau（同上） | **2.25 bit** | 68.18 / 70.20 / 68.69 / 66.16（**68.31**，σ=1.6） | 60.00 / 66.67（**63.33**） |
+| VPTQ 32×32 + calibR9 + 12.5% 专家回退 | R9tau（同上） | ~2.50 bit（2.25×87.5% + 4.25×12.5%） | 73.23 / 68.69 / 70.20 / 69.70 / 70.20 / 71.21（**70.54**，6 轮，σ≈1.5） | 70.00 / 56.67 / 56.67（**61.11**，σ=7.7） |
+| VPTQ 32×16 + calibR9 + dual-norm + row-fp8 | R9tau（同上） | 2.50 bit | 74.24 / 71.21 / 69.70（**71.72**，σ≈2.3） | 73.33 / 66.67 / 73.33（**71.11**，σ≈3.9） |
+
+calibR9 采集为严格基线口径（无 token-floor、无 save-inv、128×4096，仅数据源换为 `calib_corpus_R9tau.jsonl`）；6 个 0 命中专家无 Hessian 组，量化时单位阵回退。
+
+**读表三轴结论**：
+1. **Hessian 数据源轴**（前三行，同 tile32×16）：仅换数据源 → GPQA **+6.7**（65.53→72.22），与基线差距从 8.5 分缩至 1.77 分，aime 反超基线——**Hessian 分布与评测分布的失配是 GPQA 损伤主因**（详见结论⑨）；
+2. **tile 尺寸轴**（第 3 vs 4 行）：行高 16→32（码本摊销减半，2.50→2.25bit）GPQA **−3.9**（72.22→68.31）——码本密度是 2bit 级 VPTQ 的第一精度杠杆；
+3. **回退轴**（第 4 vs 5 行）：12.5% gate 分数回退（专家分数 = sum(激活时 gate 分数) 降序：688 整专家 + 2064 down 层 = 4128 矩阵；`gate_scores.py`/`fallback_list.py`/`rebuild_bf16.py --fallback-list`，回退专家走 msmodelslim 标准 W4A8）→ GPQA **+2.4**（68.31→70.71）——排序依据从权重域 MSE（② 的 top20 无效）换成路由域 gate 分数后回退首次兑现；但同位宽下仍不敌 tile 密度（70.71 < 72.22），且对 aime 无增益（gate 高分偏高频通用专家，数学冷门专家未覆盖；混合准则 gate×冷门度是改进方向）。
+
+4. **FP8 域归一化 + 双尺度叠加轴**（第 3 vs 6 行，同 tile32×16）：量化前 out-dim 行峰对齐 e4m3 满量程 448（`run.py --row-fp8`，复合 row_scale=rms/fp8 折回，恒等性 1.5e-08）叠加 dual-norm → GPQA 71.72 / aime 71.11，与纯 tile16+calibR9（72.22/72.22）统计持平——**无损叠加但无净增益**：单轮 74.24 为 VPTQ 组历史首个超基线（73.99）轮次，证明 FP8 域对动态范围利用的改善真实存在，却被 dual-norm 的白化中性化抵消（⑤ 的教训再现）；row-fp8 不带 dual-norm 的单独贡献隔离实验为下一步。
+
+报告：`ais_bench_logs/vptq-calibR9-tile16-attnw8a8-moew4a8-20260923/`、`vptq-calibR9-t32x32fb-20260925/`、`vptq-calibR9-t32x32fb-extra7-20260928/`（回退组 GPQA 并至 6 轮 70.54）、`vptq-calibR9-dnrowfp8-20260929/`。
+
+**结论**：① 残差贡献约 +3 分（65.30 vs 62.63）；② top20 定点修补无效（65.30 持平）——损伤是弥漫性的（k=16 码本整体粗糙），非尾部问题；③ **细块 32×16 是 VPTQ 各 tile 形态中最优**（GPQA 唯一超有残差组、aime 71.11 ≈ 基线 71.67）——局部码本密度 > 残差补偿，Tile 演进方向应继续缩小 tile 或增大 k（终局最优组 wrap 亦为 32×16 基座 + 旋转，见⑦）；④ 所有 VPTQ 预处理组 GPQA 均落后基线（73.99）约 8.5~11.4 分，k=16 级 VPTQ 预处理在该部署配方下整体为负收益，其正确形态是 Hadamard 旋转前置或端到端部署；⑤ 双尺度归一化被数据否决（通道模量 p99/中位 ≈1.1，分布本已均匀，且与 MSE 相关性 |r|≤0.17）；09-22 全量实测印证——上表 dual-norm 行 GPQA 65.75 / aime 71.67，与未归一化组 65.53/71.11 统计持平（重建 MSE −0.6pp 但 proxy_error +0.15pp，白化抹平 H⁻¹ 利用的通道结构），该线关闭；⑥ **Hadamard 旋转端到端未兑现权重域收益**：rot2 修复版 GPQA 64.54 vs 未旋转 65.53（−1.0，σ=2.04 内）、aime 65.56 vs 71.11（−5.6，但 aime σ=9.35 覆盖）——尽管量化侧 proxy 误差降 35-40%（§8A.4/8A.5 的 860 实例结论在全模型 33,024 矩阵复现）、重建态 MSE 同步下降，任务域成绩却持平甚至略降。教训有二：(a) 权重域 MSE 改善 ≠ 任务域收益，Hadamard 把误差"均摊"到所有通道的同时，也抹平了 H⁻¹ 误差传播原本利用的通道间误差结构（ proxy 目标的优化方向与下游任务损失并不对齐）；(b) **漏转 42 个张量的代价**——首版旋转（未修复 indexer.compressor 内层 wkv/wgate，详见 §8A.5 排障）同配方仅得 GPQA 63.13 / aime 55.56，修复后回升至 64.54/65.56：一个张量类别的旋转遗漏造成 ~1.4 GPQA + ~10 aime 的损失，V4-Flash 的 indexer 压缩注意力对输入一致性极度敏感，旋转类方案必须以"残差流全读取点"清单为准（本例共 82 个读取点张量）；⑦ **wrap-around Hadamard（只转专家）是终局答案**：Ŵ=Q(W·R)·Rᵀ（w1/w2/w3 全输入侧，w2 用独立 2048 维 R，Hessian 同步 RᵀHR），模型其余部分逐位不动——GPQA 66.43（15 轮，超未旋转组 +0.90、超 rot2 +1.89）、**aime 73.33（4 轮，超基线 71.67）**，VPTQ 各方案最优。归因链闭合：wrap（只动专家）≫ rot2（专家+注意力全转）⇒ **rot2 的损失来自注意力/残差侧旋转而非专家侧**；专家侧旋转正收益（权重域 rel-MSE −3~9% 在任务域兑现为 GPQA +0.9 / aime +2.2），且部署零开销（R 折入权重内部，推理图与未旋转一致）。实现：`run.py --wrap-rotation` / `rebuild_bf16.py --wrap-rotation` / `hadamard.py: wrap_rotation()`；带符号 Hadamard R 非对称（R⁻¹=Rᵀ），包装必须右乘 Rᵀ。评测侧教训：vLLM 起服初期（health 200 但 worker 未就绪）请求会整轮 500，编排器需真实请求预热探测；⑧ **补采线（floor=1024）收益确认且与旋转线正交**：aime **74.44**（3 轮，超基线 +2.78、超旧 Hessian 组 +3.33、超 wrap 组 +1.11）为全场最高——冷门专家 Hessian 质量是数学推理误差的主杠杆（兑现 §8A.7 的 Spearman -0.914 预测）；GPQA 65.87 与旧组 65.53 持平（补采只改 sub-1024 专家的 H，GPQA 损伤不在该路径）。两条线作用域不同（补采管 Hessian 质量、wrap 管权重几何），**补采+wrap 组合**为下一步（在补采 Hessian 上 `--wrap-rotation` 重跑量化即可）；⑨ **calibR9 线（Hessian-语料对齐）是 GPQA 的决定性杠杆**（上节单变量对照表）：同一 tile32×16 方案仅换 Hessian 数据源（RedPajama→R9tau 评测对齐语料）GPQA 65.53→72.22（**+6.7**，σ=1.3 历史最稳），距基线仅 1.77 分，aime 72.22 反超基线 71.67——补采线（Hessian 质量）、旋转线（权重几何）、双尺度线对 GPQA 均无实质改善，**GPQA 损伤的主因是 Hessian 分布与评测分布失配**；且对齐收益的语料门槛极低（203k token / 49 条即兑现，6 个 0 命中专家单位阵回退亦无碍）。与补采/wrap 的正交叠加（R9tau + 补采 + wrap）为终局组合方向。
 
 ### 8A.3 逐专家 MSE 分析（33,024 矩阵对实测）
 
@@ -659,6 +682,132 @@ Hessian:   输入侧旋转的叶同步 H' = RᵀHR、H'⁻¹ = RᵀH⁻¹R（零
 - **成本**：token 缺口 floor 2000/4000/8000 = 0.7M/3.7M/17.7M expert-token，按均匀上界折 29/152/722 条序列，计入偏斜分配效率（~3–5×）后 floor=4000 约 500 条序列量级——采集时间 7→~14min/层。
 - **实现要点**：`HessianCollector` 增加"专家下限检查 + 继续消费样本直到达标或样本耗尽"循环（与 EAQuant 的上限截断对称：已达标专家跳过累积，节省累积算力）；低层（hash 0–2）无需求，可跳过。原产物 43 层无需重采——补采是增量更新（`HessianAccumulator` 状态可从已存 `hessian/mean/n_tokens` 恢复续加）。
 
+### 8A.7b dual-norm 双尺度归一化算法（2026-09-20/22，`--dual-norm`）
+
+**动机**：若权重通道模量不均（部分通道能量远高于其他），VQ 码本被大能量通道主导，小能量通道量化粗糙。对策是先把行/列能量归一化、在"白化"空间做 VQ，重建时把尺度折回。§8A.2⑤ 的先验分析显示本模型权重分布本已均匀（通道模量 p99/中位 ≈1.1），实测该消融与未归一化组统计持平（结果见 §8A.2 表 dual-norm 行）——算法本身正确且已落地，记录于此备其他模型复用。
+
+**数学**：变量代换 `x̃ = d ⊙ x`（D=diag(d)）下的共轭 Hessian
+
+```
+H̃ = E[x̃x̃ᵀ] = D H D
+(H̃)⁻¹ = D⁻¹ H⁻¹ D⁻¹
+```
+
+误差补偿（Cholesky 上三角 U）在共轭空间进行：`HinvU = chol((H̃)⁻¹).t()`——等价于对归一化后的权重 `W_norm` 做标准 GPTQ 式逐列传播，几何自洽。
+
+**尺度计算**（`run.py`）：
+
+| 尺度 | 定义 | 代码 |
+|---|---|---|
+| 列尺度 d_j | `rms over rows(cat(W1,W3))[:, j]`（w1/w3 共享）；w2 独立按自身列 | `_row_norm` / 专家对分支 |
+| 行尺度 s_i | `rms(W_i, :) = sqrt(mean_j W_ij²)`，clamp 1e-8 | `_row_norm` |
+
+归一化与重建：
+
+```
+W_norm = W / (s ⊗ d)          # 量化在归一化空间
+Ŵ ≈ (s ⊗ d) ⊙ Q(W_norm)       # 重建时折回（左乘 s、右乘 d）
+```
+
+**关键正确性约束——列尺度对同一输入 x 自洽**：w1/w3 消费同一 `mlp_in` 激活，若各自取列尺度则 x̃ 的代换在两个矩阵间不一致；必须拼接两矩阵联合计算共享 `d_joint`（`run.py: dual_norm 专家对分支`）。w2 的输入是 SwiGLU 中间激活（独立一组 Hessian），故独立取 d。共轭变换本身在 HessianStore 的原始 H 上进行（`dual_hessian`），无需重采。
+
+**产物与折回链**：`QuantizedWeight.row_scale (out,) / col_scale (in,)`（`vq.py`，None=未归一化）→ `rebuild_bf16` 按 `row ⊗ col` 折回 BF16；H⁻¹ 缺失时 `dual_hinvU` 从共轭 H 现算（`cholesky_upper_of_inv`）。
+
+**量化侧观测**（quant_report 均值）：重建域 MSE 略降（15.38%→14.80%），但 Hessian 加权 proxy_error 反升（3.45%→3.60%）——双尺度把能量均匀化的同时抹平了 H⁻¹ 误差传播原本利用的通道间结构（与 §8A.2⑥(a) 的 Hadamard 教训同构：权重域/白化空间的改善不必然传导到任务域）。
+
+### 8A.7c 专家回退策略与实现（2026-09-24，gate 分数排序，`--fallback-list`）
+
+**策略定义**（以矩阵计的总预算 43×256×3×12.5% = 4128，对半分配）：
+
+| 类别 | 数量 | 公式 | 回退范围 |
+|---|---|---|---|
+| 整专家回退 | **688** 个专家 | 43×256×3×12.5%×0.5/**3** | w1+w2+w3 全部 |
+| down 层回退 | **2064** 个矩阵 | 43×256×3×12.5%×0.5 | 仅 w2 |
+
+**排序依据**：专家分数 = `sum(专家被激活时的 gate 分数)` —— score 路由层每个
+(token, topk) 命中按 routing weight 累加，**降序**回退高分者（每次被选中时路由
+权重大 → 量化损伤的输出代价高）。hash 路由层（L0-2 查表，无 gate 分数）不参与
+排序。
+
+**回退语义**：名单内专家**不走 VPTQ**，重建时保持原始 BF16，经 msmodelslim 走
+标准 W4A8(mxfp4) 路径（与基线处理一致）——即"高分专家花更多 bit 买精度"。
+位宽核算：2.25bit×87.5% + ~4.25bit×12.5% ≈ 2.50bit（t32×32 基座）。
+
+**代码实现**（三组件流水线）：
+
+```
+vptq/tools/deepseek_v4/gate_scores.py      组件①：Gate forward hook 累加
+                                           (weights, indices) → 每 (layer, expert)
+                                           的 gate 分数和 → gate_scores.json
+                                           （hash 层记 null；与 Hessian 同源样本：
+                                           同 data_file/seed/round 逐位一致）
+        ↓
+vptq/tools/quantize/fallback_list.py       组件②：按分数降序取前 688 → full、
+                                           接 2064 → down_only（跳过已 full 的
+                                           专家防重叠）→ fallback_list.json
+                                           （meta 含预算核对字段）
+        ↓
+rebuild_bf16.py --fallback-list <json>     组件③：pass_rebuild 循环内按
+                                           (layer_idx, short) 二元组查名单跳过
+                                           生成 expert_parts → pass_assemble 时
+                                           copy 原始 BF16 换入
+```
+
+关键实现细节：① 名单 key 必须带 **layer 维度**（short 名如
+`ffn.experts.6.w2.weight` 不含层前缀，同专家号跨 43 层同名）；② 组件① 的
+`build_samples` 走 `--data-file` 分支时返回 list，需自行 `torch.tensor`（踩坑
+记录）；③ 采集约 25 分钟（单卡 stream，43 层前向 + hook 累加）。
+
+**实测**（§8A.2 单变量表第 4/5 行）：gate 分数回退 GPQA **+2.4**（68.31→70.54，
+6 轮）—— 排序依据从权重域 MSE（② 的 top20 修补无效）换成路由域 gate 分数后
+回退首次兑现增益；但同位宽下仍不敌 tile 密度（70.54 < 72.22），且对 aime 无
+增益（gate 高分偏高频通用专家，数学冷门专家未覆盖；混合准则 gate×冷门度是
+改进方向）。
+
+### 8A.7e weights 目录用途与策略总表（活文档：新产物须同步更新本表）
+
+磁盘：`/mnt/share/w00608002/weights`（≈19T）。命名约定：`-bf16` 后缀 = VPTQ 重建中间产物
+（543GB 级，部署后可删）；`-attnw8a8-moew4a8` 后缀 = msmodelslim 部署权重（153GB，vllm serve 用）。
+
+**A. Hessian 与量化中间产物（非权重）**
+
+| 目录 | 用途 | 策略/口径 |
+|---|---|---|
+| `hessians/DeepSeek-V4-Flash-BF16-rpmix` | 基线 Hessian（8.8T） | RedPajama 6-slice、128×4096、含 topup1024/4k 增量 |
+| `hessians/DeepSeek-V4-Flash-BF16-calibR9` | **calibR9 Hessian（现行主用）** | R9tau 评测对齐语料（49 条 203k token）、严格基线口径、含 inv 与 gate_scores |
+| `quant/dsv4-*` | 各线量化产物 + quant_report.json | 命名含方案（tile 规格/回退/归一化）；t32x32 系含 fallback_list.json |
+| `calib_data/` | R9tau 校准语料（jsonl） | calibR9 线数据源 |
+
+**B. VPTQ 重建 BF16（中间产物，评测完成且无复用计划可删）**
+
+| 目录 | 策略 | 对应 §8A.2 数据点 |
+|---|---|---|
+| `vptq-calibR9-tile16-bf16` | 32×16 + calibR9 | 72.22（最优基座） |
+| `vptq-calibR9-t32x32-bf16` | 32×32 + calibR9 | 68.31 |
+| `vptq-calibR9-t32x32fb-bf16` | 32×32 + 12.5% gate 回退 | 70.54 |
+| `vptq-calibR9-dnrowfp8-bf16` | 32×16 + dual-norm + row-fp8 | 71.72 |
+| `vptq-calibR9-rf16fb-bf16` | **32×16 + row-fp8 + gate 回退（09-29 进行中）** | 待评测 |
+
+**C. 部署权重（vllm serve 入口，153GB each）**
+
+| 目录 | 策略 | 状态 |
+|---|---|---|
+| `DeepSeek-V4-Flash-attnw8a8ceil-moew4a8` | 无 VPTQ 基线（73.99/71.67） | 保留（对照锚点） |
+| `vptq-tile16-attnw8a8-moew4a8` | 32×16+rpmix（65.53） | 已评测 |
+| `vptq-topup1024-...` | 补采 floor1024（65.87/74.44） | 已评测 |
+| `vptq-wrap-tile16-...` | wrap Hadamard（66.43/73.33） | 已评测 |
+| `vptq-dualnorm-tile16-...` | dual-norm（65.75） | 已评测（线关闭） |
+| `vptq-rot/rot2-tile16-...`、`vptq-tile/nores/hyb-*` | §8A.2 历史消融 | 已评测 |
+| `vptq-calibR9-tile16-...` | 32×16+calibR9（72.22） | 已评测（主结果） |
+| `vptq-calibR9-t32x32[-fb]-...` | 32×32 系 | 已评测 |
+| `vptq-calibR9-dnrowfp8-...` | dual-norm+row-fp8 | 已评测 |
+| `vptq-calibR9-rf16fb-...` | **row-fp8+回退（S5 进行中）** | 待评测 |
+| `w4a4-*`、`attnNative-*`、`BF16-rot2`、`vbench` | 早期/其他线产物 | 历史存档 |
+
+**D. 隔离区**：`_OVERWRITTEN_*` 两个污染部署目录已于 2026-09-29 确认删除（原数据均在事故前完成评测，无损失，释放 ~306G）。
+
+**维护规则**：每次新线产出（quant/BF16/部署）落地时，在本表追加行（策略 + 数据点 + 状态）；被删目录同步标注。
+
 ### 8A.8 资产索引
 
 ```
@@ -673,6 +822,15 @@ weights/DeepSeek-V4-Flash-vptq-wrap-tile16-attnw8a8-moew4a8/  wrap 组部署权�
 work/vllm-ascend/ais_bench_logs/            七组评测归档（vptq-tile / hyb / nores / tile16 / rot2 / wrap）
 quantize_dsv4_experts.sh                    一键量化（8 卡分片 + 看门狗）
 quantize_dsv4_experts_tile16_wrap.sh        wrap 组一键量化（--wrap-rotation）
+quantize_dsv4_experts_tile16_dualnorm.sh    dual-norm 组一键量化（--dual-norm）
+calib_collect_par.sh                         calibR9 采集 4 分片并行版（stream 模式，绕单实例锁）
+weights/hessians/DeepSeek-V4-Flash-BF16-calibR9/   calibR9 Hessian（R9tau 语料，43 层）
+weights/quant/dsv4-tile32x16-nores-calibR9/  calibR9 量化产物 + quant_report.json
+weights/DeepSeek-V4-Flash-vptq-calibR9-tile16-attnw8a8-moew4a8/  calibR9 部署权重（§8A.2⑨）
+vptq/tools/deepseek_v4/gate_scores.py         gate 分数采集（Gate hook，R9tau 语料）
+vptq/tools/quantize/fallback_list.py          回退名单生成（gate 分数降序，688+2064）
+vptq/tools/quantize/rebuild_bf16.py           --fallback-list 回退支持
+weights/DeepSeek-V4-Flash-vptq-calibR9-t32x32fb-attnw8a8-moew4a8/  B 组（12.5% 回退）部署权重
 documents/imgs/                             本文档引用的分析图（expert_ntokens_*.png / ab_mse_*.png 等，本地相对路径）
 ```
 

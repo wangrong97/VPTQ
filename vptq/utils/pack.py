@@ -11,7 +11,6 @@ from typing import Dict
 import accelerate
 import torch
 import tqdm
-from sentence_transformers.SentenceTransformer import SentenceTransformer
 
 import vptq
 
@@ -267,6 +266,9 @@ def fix_tensor_in_config(model):
 
 
 def pack_model(qmodel, from_type, to_type, as_type):
+    # 延迟导入：量化工具链只用 unpack_index_tensor，不应被此可选依赖阻塞
+    from sentence_transformers.SentenceTransformer import SentenceTransformer
+
     if isinstance(qmodel, SentenceTransformer):
         st_model = qmodel
 

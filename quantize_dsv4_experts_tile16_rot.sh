@@ -13,9 +13,9 @@ set -u
 cd "$(dirname "$0")"
 
 # ------------------------------ 配置 ----------------------------------------
-CKPT=/mnt/share/rr08002/weights/DeepSeek-V4-Flash-BF16-rot
-HESSIAN_DIR=/mnt/share/rr08002/weights/hessians/DeepSeek-V4-Flash-BF16-rpmix
-OUTPUT_DIR=/mnt/share/rr08002/weights/quant/dsv4-tile32x16-nores-rot
+CKPT=/mnt/share/w00608002/weights/DeepSeek-V4-Flash-BF16-rot
+HESSIAN_DIR=/mnt/share/w00608002/weights/hessians/DeepSeek-V4-Flash-BF16-rpmix
+OUTPUT_DIR=/mnt/share/w00608002/weights/quant/dsv4-tile32x16-nores-rot
 LOG_DIR=$OUTPUT_DIR/logs
 
 # Tile 方案参数（实测 1.2s/矩阵，proxy_error ~1.5%，2.66 bit/权重）
@@ -61,7 +61,7 @@ start() {
             --row-tile $ROW_TILE --centroid-fp8 \
             --group-num $GROUP_NUM --kmeans-iters $KMEANS_ITERS \
             --device npu --layer-range 0:$N_LAYERS \
-            --expert-range $e0:$e1 --scope experts --rotation /mnt/share/rr08002/weights/DeepSeek-V4-Flash-BF16-rot/rotation.safetensors" \
+            --expert-range $e0:$e1 --scope experts --rotation /mnt/share/w00608002/weights/DeepSeek-V4-Flash-BF16-rot/rotation.safetensors" \
             > /dev/null 2>&1 &
         echo "shard $i: npu:$i experts $e0:$e1 -> $LOG_DIR/shard$i.log (pid $!)"
     done

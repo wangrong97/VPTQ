@@ -18,7 +18,7 @@ reused for the router.
 Example (single NPU, streaming):
     python -m vptq.tools.deepseek_v4.collect_hessian \
         --ckpt /mnt/share/weight/DeepSeek-V4-Flash-BF16 \
-        --data-dir /mnt/share/rr08002/weights/RedPajama-Data-1T-Sample \
+        --data-dir /mnt/share/w00608002/weights/RedPajama-Data-1T-Sample \
         --output-dir ./hessians/dsv4-flash \
         --nsamples 32 --seqlen 4096 --device npu --residency stream
 """

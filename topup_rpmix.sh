@@ -23,13 +23,13 @@
 # 保活:      协作方会话内每分钟检查本脚本与 python 都不在时自动拉起（尊重 STOP）
 # =============================================================================
 set -u
-cd /mnt/share/rr08002/work/VPTQ
+cd /mnt/share/w00608002/work/VPTQ
 
-OUT=/mnt/share/rr08002/weights/hessians/DeepSeek-V4-Flash-BF16-rpmix
+OUT=/mnt/share/w00608002/weights/hessians/DeepSeek-V4-Flash-BF16-rpmix
 # 09-18: 新容器无本地副本（/root/dsv4-weights 已不存在），改 NFS 直跑。
 # 若 NFS 掉线导致 attempt 连续烧完，可再同步本地副本后改回。
 CKPT=/mnt/share/weight/DeepSeek-V4-Flash-BF16
-DATA=/mnt/share/rr08002/weights/RedPajama-Data-1T-Sample
+DATA=/mnt/share/w00608002/weights/RedPajama-Data-1T-Sample
 STAGING=/root/topup_staging
 LOG=$OUT/topup.log
 # persistent round counter: fresh data comes from --topup-round (the

@@ -14,10 +14,10 @@ cd "$(dirname "$0")"
 
 # ------------------------------ 配置 ----------------------------------------
 CKPT=/mnt/share/weight/DeepSeek-V4-Flash-BF16
-HESSIAN_DIR=/mnt/share/rr08002/weights/hessians/DeepSeek-V4-Flash-BF16-rpmix
+HESSIAN_DIR=/mnt/share/w00608002/weights/hessians/DeepSeek-V4-Flash-BF16-rpmix
 # 09-19: 补采(topup floor=1024)后的 Hessian 量化,输出到新目录;
 # 旧基线保留在 dsv4-tile32x16-nores(quant_report.json 是 8A.2 对照基准,勿覆盖)
-OUTPUT_DIR=/mnt/share/rr08002/weights/quant/dsv4-tile32x16-nores-dualnorm
+OUTPUT_DIR=/mnt/share/w00608002/weights/quant/dsv4-tile32x16-nores-dualnorm
 LOG_DIR=$OUTPUT_DIR/logs
 
 # Tile 方案参数（实测 1.2s/矩阵，proxy_error ~1.5%，2.66 bit/权重）

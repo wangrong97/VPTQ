@@ -10,11 +10,11 @@
 # 抗 killer:attempt 循环 + act_ckpt(attempt 级保留)+ staging 上传。
 # =============================================================================
 set -u
-cd /mnt/share/rr08002/work/VPTQ
+cd /mnt/share/w00608002/work/VPTQ
 
-OUT=/mnt/share/rr08002/weights/hessians/DeepSeek-V4-Flash-BF16-calibR9
+OUT=/mnt/share/w00608002/weights/hessians/DeepSeek-V4-Flash-BF16-calibR9
 CKPT=/mnt/share/weight/DeepSeek-V4-Flash-BF16
-DATA_FILE=/mnt/share/rr08002/weights/calib_data/calib_corpus_R9tau.jsonl
+DATA_FILE=/mnt/share/w00608002/weights/calib_data/calib_corpus_R9tau.jsonl
 STAGING=/root/calib_staging
 LOG=$OUT/collect.log
 mkdir -p $OUT
@@ -32,7 +32,7 @@ for attempt in $(seq 1 30); do
   echo "=== calib collect attempt $attempt $(date) ===" >> $LOG
   python3 -m vptq.tools.deepseek_v4.collect_hessian \
     --ckpt $CKPT \
-    --data-dir /mnt/share/rr08002/weights/calib_data \
+    --data-dir /mnt/share/w00608002/weights/calib_data \
     --data-file $DATA_FILE \
     --output-dir $OUT \
     --nsamples 128 --seqlen 4096 --batch-size 4 \

@@ -135,7 +135,18 @@ class HessianStore:
         self, layer_idx: int, group_key: str
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """Return (hessian, inv_hessian or None) for a group."""
-        entry = self._load(layer_idx)[group_key]
+        entry = self._load(layer_idx).get(group_key)
+        if entry is None:
+            # 小语料（如 calibR9 49 条）下 0 命中的冷门专家无 Hessian 组：
+            # 回退单位阵——加权退化为均匀、误差传播退化为近恒等，
+            # 该专家等价朴素 VQ（无校准信息下的最保守行为）
+            n = 2048 if group_key.endswith(".w2") else 4096
+            logger.warning(
+                "group %s missing at layer %d (zero-hit expert); "
+                "fall back to identity Hessian (%dx%d)",
+                group_key, layer_idx, n, n,
+            )
+            return torch.eye(n), None
         H, inv = entry["hessian"], entry.get("inv_hessian")
         if self.R is not None and is_rotated_group(group_key, wrap=self.wrap):
             R = self.R

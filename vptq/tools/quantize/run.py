@@ -219,6 +219,7 @@ def quantize_layer(
     on_weight=None,
     wrap_R: Optional[torch.Tensor] = None,
     dual_norm: bool = False,
+    row_fp8: bool = False,
 ) -> Dict[str, QuantizedWeight]:
     prefix = f"layers.{layer_idx}."
     out: Dict[str, QuantizedWeight] = {}
@@ -251,6 +252,17 @@ def quantize_layer(
         from vptq.tools.quantize.vq import cholesky_upper_of_inv
         Hn, _ = dual_hessian(H, inv, d)
         return cholesky_upper_of_inv(Hn, config.damp)
+
+    def _row_fp8(W):
+        """量化前 out-dim 归一化到 FP8 表示域：行峰对齐 e4m3 max=448。
+
+        行对角缩放与 dual-norm 的行 rms 可交换，重建时折回；
+        与 dual_norm 叠加时 row_scale 存复合值（fp8_scale × rms_scale）。
+        """
+        Wf = W.float()
+        peak = Wf.abs().amax(dim=1).clamp_min(1e-12)
+        scale = 448.0 / peak
+        return Wf * scale[:, None], scale
 
     def _row_norm(W, d):
         """给定共享列尺度 d，行归一化并返回 (W_norm, s)。"""
@@ -298,15 +310,26 @@ def quantize_layer(
         W1 = maybe_wrap(s1, weights.get(prefix + s1))
         W3 = maybe_wrap(s3, weights.get(prefix + s3))
         d_joint = None
+        fp1 = fp3 = None
+        if row_fp8:  # 第一步：out-dim 峰对齐 448（在 dual-norm 之前）
+            W1, fp1 = _row_fp8(W1)
+            W3, fp3 = _row_fp8(W3)
         if dual_norm:
             # in-channel 尺度必须对同一输入 x 自洽：w1/w3 拼接计算共享 d
             d_joint = torch.cat([W1.float(), W3.float()], 0) \
                           .pow(2).mean(0).sqrt().clamp_min(1e-8)
             W1n, s1s = _row_norm(W1, d_joint)
             W3n, s3s = _row_norm(W3, d_joint)
+            # FP8 归一化是放大（448/peak），折回须除回：row_scale = rms / fp
+            s1s = s1s / fp1 if fp1 is not None else None
+            s3s = s3s / fp3 if fp3 is not None else None
             hessian, inv = store.get(layer_idx, hess_key)
             hessian, _ = dual_hessian(hessian, inv, d_joint)
             HinvU = dual_hinvU(layer_idx, hess_key, d_joint)
+        elif row_fp8:
+            W1n, W3n, s1s, s3s = W1, W3, fp1, fp3
+            hessian, _ = store.get(layer_idx, hess_key)
+            HinvU = store.cholesky_upper(layer_idx, hess_key, damp=config.damp)
         else:
             W1n, W3n, s1s, s3s = W1.float(), W3.float(), None, None
             hessian, _ = store.get(layer_idx, hess_key)
@@ -342,20 +365,34 @@ def quantize_layer(
             tuple(W.shape),
             hess_key,
         )
-        if dual_norm and _WRAP_LEAF_RE.match(short):
+        if (dual_norm or row_fp8) and _WRAP_LEAF_RE.match(short):
             # w2：独立列尺度（输入是 SwiGLU 中间激活，自己一组 H）
-            Wf = W.float()
-            d = Wf.pow(2).mean(0).sqrt().clamp_min(1e-8)
-            Wn, s_row = _row_norm(W, d)
-            hessian, inv = store.get(layer_idx, hess_key)
-            hessian, _ = dual_hessian(hessian, inv, d)
-            HinvU = dual_hinvU(layer_idx, hess_key, d)
-            out[short] = vptq_quantize(
-                Wn, hessian.float(), config, device=device,
-                hessian_inv_upper=HinvU,
-                kmeans_seed=hash(name) & 0xFFFF,
-            )
-            out[short].row_scale, out[short].col_scale = s_row, d
+            fp = None
+            if row_fp8:
+                W, fp = _row_fp8(W)
+            if dual_norm:
+                Wf = W.float()
+                d = Wf.pow(2).mean(0).sqrt().clamp_min(1e-8)
+                Wn, s_row = _row_norm(W, d)
+                s_row = s_row / fp if fp is not None else s_row
+                hessian, inv = store.get(layer_idx, hess_key)
+                hessian, _ = dual_hessian(hessian, inv, d)
+                HinvU = dual_hinvU(layer_idx, hess_key, d)
+                out[short] = vptq_quantize(
+                    Wn, hessian.float(), config, device=device,
+                    hessian_inv_upper=HinvU,
+                    kmeans_seed=hash(name) & 0xFFFF,
+                )
+                out[short].row_scale, out[short].col_scale = s_row, d
+            else:  # row_fp8 only：Hessian 不变换，仅行 scale 折回
+                out[short] = vptq_quantize(
+                    W, store.get(layer_idx, hess_key)[0].float(), config,
+                    device=device,
+                    hessian_inv_upper=store.cholesky_upper(
+                        layer_idx, hess_key, damp=config.damp),
+                    kmeans_seed=hash(name) & 0xFFFF,
+                )
+                out[short].row_scale, out[short].col_scale = 1.0 / fp, None
         else:
             out[short] = quantize_one(
                 W, store, layer_idx, hess_key, config, device,
@@ -455,6 +492,13 @@ def main():
         "writes are ~56%% of quantization wall time). Resume-safe: "
         "residual staged parts are flushed before the resume scan.",
     )
+    p.add_argument(
+        "--row-fp8",
+        action="store_true",
+        help="quantize in FP8 (e4m3) domain: per-row peak aligned to 448 "
+        "before (optional) dual-norm; folded back via row_scale. "
+        "Composes with --dual-norm.",
+        )
     p.add_argument(
         "--dual-norm",
         action="store_true",
@@ -564,6 +608,7 @@ def main():
             on_weight=on_weight,
             wrap_R=wrap_R,
             dual_norm=args.dual_norm,
+            row_fp8=args.row_fp8,
         )
         merged: Dict[str, QuantizedWeight] = {}
         for short in sorted(done_shorts | set(out)):

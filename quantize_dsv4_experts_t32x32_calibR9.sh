@@ -14,8 +14,10 @@ cd "$(dirname "$0")"
 
 # ------------------------------ 配置 ----------------------------------------
 CKPT=/mnt/share/weight/DeepSeek-V4-Flash-BF16
-HESSIAN_DIR=/mnt/share/w00608002/weights/hessians/DeepSeek-V4-Flash-BF16-rpmix
-OUTPUT_DIR=/mnt/share/w00608002/weights/quant/dsv4-tile32x16-nores-wrap
+HESSIAN_DIR=/mnt/share/w00608002/weights/hessians/DeepSeek-V4-Flash-BF16-calibR9
+# 09-20: floor=4000 补采后(below 4382→430)的 Hessian 量化对照;
+# topup1024 版(劣化,+38% 坑底)保留勿动;原始基线在 dsv4-tile32x16-nores
+OUTPUT_DIR=/mnt/share/w00608002/weights/quant/dsv4-tile32x32-nores-calibR9
 LOG_DIR=$OUTPUT_DIR/logs
 
 # Tile 方案参数（实测 1.2s/矩阵，proxy_error ~1.5%，2.66 bit/权重）
@@ -23,7 +25,7 @@ V_LEN=2               # 主量化向量长
 K=16                  # 主码本大小（4bit 索引）
 K_RES=16              # 残差码本大小
 V_RES=8               # 残差向量长（解耦）
-ROW_TILE=16          # tile 行高
+ROW_TILE=32          # tile 行高（32x32 实验组）
 GROUP_NUM=128         # 列组数（in_features/32）
 KMEANS_ITERS=5
 
@@ -61,7 +63,7 @@ start() {
             --row-tile $ROW_TILE --centroid-fp8 \
             --group-num $GROUP_NUM --kmeans-iters $KMEANS_ITERS \
             --device npu --layer-range 0:$N_LAYERS \
-            --expert-range $e0:$e1 --scope experts --wrap-rotation /mnt/share/w00608002/weights/DeepSeek-V4-Flash-BF16-rot2/rotation.safetensors" \
+            --expert-range $e0:$e1 --scope experts" \
             > /dev/null 2>&1 &
         echo "shard $i: npu:$i experts $e0:$e1 -> $LOG_DIR/shard$i.log (pid $!)"
     done

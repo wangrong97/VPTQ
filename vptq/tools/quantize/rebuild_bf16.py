@@ -95,8 +95,30 @@ def load_layer_quant(quant_dir: str, layer_idx: int) -> dict:
     return merged
 
 
+def _fallback_sets(path):
+    """Parse fallback_list.json -> (full_keys, down_keys).
+
+    full_keys: experts whose w1/w2/w3 all fall back to BF16;
+    down_keys: experts whose w2 only falls back.
+    Keys match the quant short names, e.g. ffn.experts.6.w2.weight.
+    """
+    if not path:
+        return frozenset(), frozenset()
+    with open(path) as f:
+        lst = json.load(f)
+    full = frozenset(
+        (li, f"ffn.experts.{e}.{w}.weight")
+        for li, e in lst["full"] for w in ("w1", "w2", "w3")
+    )
+    down = frozenset(
+        (li, f"ffn.experts.{e}.w2.weight") for li, e in lst["down_only"]
+    )
+    return full, down
+
+
 def pass_rebuild(args):
     os.makedirs(args.parts_dir, exist_ok=True)
+    fb_full, fb_down = _fallback_sets(getattr(args, "fallback_list", None))
     with open(os.path.join(args.ckpt, "model.safetensors.index.json")) as f:
         wmap = json.load(f)["weight_map"]
     device = torch.device(args.device)
@@ -111,6 +133,12 @@ def pass_rebuild(args):
             continue
         done = 0
         for short, qw in quant.items():
+            if (layer_idx, short) in fb_full:
+                logger.info("fallback(full): L%d %s", layer_idx, short)
+                continue
+            if (layer_idx, short) in fb_down:
+                logger.info("fallback(down): L%d %s", layer_idx, short)
+                continue
             full = f"layers.{layer_idx}.{short}"
             if full not in wmap:
                 logger.warning("not in checkpoint index: %s", full)
@@ -131,8 +159,11 @@ def pass_rebuild(args):
             # in_f for padded matrices — slice before broadcasting.
             if getattr(qw, "row_scale", None) is not None:
                 s = qw.row_scale[:out_f].to(Q.device).float()
-                d = qw.col_scale[:in_f].to(Q.device).float()
-                Q = Q.float() * s[:, None] * d[None, :]
+                Q = Q.float() * s[:, None]
+                # col_scale 仅 dual-norm 路径存在；row-fp8-only 存 None
+                if getattr(qw, "col_scale", None) is not None:
+                    d = qw.col_scale[:in_f].to(Q.device).float()
+                    Q = Q * d[None, :]
             if wrap_R is not None and EXPERT_RE.fullmatch(full):
                 # wrap-around: stored weight is Q(V) @ R^T with V = W @ R
                 # (signed Hadamard R is orthogonal but NOT symmetric:
@@ -219,6 +250,12 @@ def main():
     p.add_argument("--row-tile", type=int, default=256)
     p.add_argument("--device", default="npu")
     p.add_argument("--assemble", action="store_true")
+    p.add_argument(
+        "--fallback-list", default=None,
+        help="fallback_list.json (from vptq.tools.quantize.fallback_list): "
+        "listed experts keep original BF16 (full: w1+w2+w3; down_only: w2) "
+        "and go through msmodelslim's standard W4A8 path instead of VPTQ.",
+    )
     p.add_argument(
         "--wrap-rotation",
         default=None,

@@ -26,7 +26,7 @@ Example:
     python -m vptq.tools.quantize.eval_fp8_codebook \
         --ckpt /mnt/share/weight/DeepSeek-V4-Flash-BF16 \
         --tensor layers.2.ffn.experts.0.w1.weight \
-        --hessian-dir /mnt/share/rr08002/weights/hessians/DeepSeek-V4-Flash-BF16-rpmix \
+        --hessian-dir /mnt/share/w00608002/weights/hessians/DeepSeek-V4-Flash-BF16-rpmix \
         --layer 2 --group ffn.experts.0.mlp_in \
         --vector-len 16 --num-centroids 65536 --res-centroids 4096 \
         --tile-size 512 --device npu:3

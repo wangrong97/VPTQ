@@ -2,7 +2,7 @@
 # =============================================================================
 # DeepSeek-V4-Flash-BF16 路由专家一键量化（Tile 方案 v2-k16-res8-fp8）
 #
-# - 仅量化 MoE 路由专家（--scope experts；共享专家与注意力保持 BF16）
+# - 仅量化 MoE 路由专家（--scope experts --row-fp8；共享专家与注意力保持 BF16）
 # - 8 卡并行：每卡一个进程，各负责 32 个专家 × 43 层
 # - 每进程带看门狗：环境会 ~20-25 分钟杀进程，被杀后自动重启，
 #   逐矩阵落盘（.parts）保证重启零损失
@@ -14,8 +14,10 @@ cd "$(dirname "$0")"
 
 # ------------------------------ 配置 ----------------------------------------
 CKPT=/mnt/share/weight/DeepSeek-V4-Flash-BF16
-HESSIAN_DIR=/mnt/share/w00608002/weights/hessians/DeepSeek-V4-Flash-BF16-rpmix
-OUTPUT_DIR=/mnt/share/w00608002/weights/quant/dsv4-tile32x16-nores-wrap
+HESSIAN_DIR=/mnt/share/w00608002/weights/hessians/DeepSeek-V4-Flash-BF16-calibR9
+# 09-20: floor=4000 补采后(below 4382→430)的 Hessian 量化对照;
+# topup1024 版(劣化,+38% 坑底)保留勿动;原始基线在 dsv4-tile32x16-nores
+OUTPUT_DIR=/mnt/share/w00608002/weights/quant/dsv4-tile32x16-rowfp8-fb-calibR9
 LOG_DIR=$OUTPUT_DIR/logs
 
 # Tile 方案参数（实测 1.2s/矩阵，proxy_error ~1.5%，2.66 bit/权重）
@@ -61,7 +63,7 @@ start() {
             --row-tile $ROW_TILE --centroid-fp8 \
             --group-num $GROUP_NUM --kmeans-iters $KMEANS_ITERS \
             --device npu --layer-range 0:$N_LAYERS \
-            --expert-range $e0:$e1 --scope experts --wrap-rotation /mnt/share/w00608002/weights/DeepSeek-V4-Flash-BF16-rot2/rotation.safetensors" \
+            --expert-range $e0:$e1 --scope experts --row-fp8" \
             > /dev/null 2>&1 &
         echo "shard $i: npu:$i experts $e0:$e1 -> $LOG_DIR/shard$i.log (pid $!)"
     done
