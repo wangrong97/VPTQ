@@ -165,6 +165,12 @@ class VQuantLinear(nn.Module):
         # === 3. set centroids and indices for the residual quantization
         # to reduce index size and bypass nccl check
         self.is_indice_packed = is_indice_packed
+        # group_size / num_indices are needed by the residual branch below
+        # (they used to be computed only in section 6, which broke
+        # residual + unpacked construction)
+        self.group_size = group_size
+        self.padding = (-self.out_features) % self.vector_len
+        self.num_indices = (self.out_features + self.padding) // self.vector_len
         self.num_res_centroids = num_res_centroids[1]
         self.enable_residual = self.num_res_centroids > 0
         if self.enable_residual:
@@ -190,8 +196,11 @@ class VQuantLinear(nn.Module):
         self.enable_perm = enable_perm
         if self.enable_perm:
             perm_dtype = torch.int16 if self.is_indice_packed else torch.int64
+            # NOTE: create on CPU and move afterwards — some backends
+            # (e.g. Ascend NPU aclnnArange) do not support int16 arange
+            # on-device.
             self.perm = Parameter(
-                torch.arange(self.in_features, device=device, dtype=perm_dtype),
+                torch.arange(self.in_features, dtype=perm_dtype).to(device),
                 requires_grad=False,
             )
 
@@ -210,9 +219,6 @@ class VQuantLinear(nn.Module):
             )
 
         # === 6. process packed indices
-        self.group_size = group_size
-        self.padding = (-self.out_features) % self.vector_len
-        self.num_indices = (self.out_features + self.padding) // self.vector_len
         dtype = torch.int32 if self.is_indice_packed else torch.int16
         if self.is_indice_packed:
             self.index_bits = int(math.log2(self.num_centroids))
@@ -410,7 +416,7 @@ class VQuantLinear(nn.Module):
             is_indice_packed=self.is_indice_packed,
             enable_outlier=self.enable_outlier,
             enable_residual=self.enable_residual,
-            enbale_perm=self.enable_perm,
+            enable_perm=self.enable_perm,
             enable_norm=self.enable_norm,
             num_centroids=self.num_centroids,
             num_centroids_outlier=self.num_outlier_centroids,
@@ -430,22 +436,23 @@ class VQuantLinear(nn.Module):
         return proxy_error
 
     def _batched_indices(self, vectors, centroids, batch_size=16384):
+        device = centroids.device
         vectors = vectors.cpu()
-        centroids = centroids.to("cuda").float()
+        centroids = centroids.to(device).float()
         n_vectors = vectors.shape[0]
         n_batches = (n_vectors + batch_size - 1) // batch_size
         indices = []
         for i in range(n_batches):
             start = i * batch_size
             end = min(start + batch_size, n_vectors)
-            sub_vectors = vectors[start:end].to("cuda").float()
+            sub_vectors = vectors[start:end].to(device).float()
             dist_batch = torch.cdist(sub_vectors, centroids)
             indices_batch = torch.argmin(dist_batch, dim=-1)
             indices.append(indices_batch)
         return torch.hstack(indices)
 
     def _get_indices(self, vectors, centroids):
-        centroids = centroids.to("cuda").float()
+        centroids = centroids.float()
         sub_vectors = vectors
         dist_batch = torch.cdist(sub_vectors.float(), centroids)
         indices = torch.argmin(dist_batch, dim=-1)
@@ -457,7 +464,8 @@ class VQuantLinear(nn.Module):
         weights = weights.T
 
         # (in, out) -> (in * out / vector, vector)
-        vectors = weights.reshape(-1, self.vector_len).to("cuda")
+        device = self.centroids.weight.device
+        vectors = weights.reshape(-1, self.vector_len).to(device)
         centroids = self.centroids.weight.view(
             self.num_codebooks, self.num_centroids, self.vector_len
         )
@@ -497,7 +505,7 @@ class VQuantLinear(nn.Module):
             is_indice_packed=self.is_indice_packed,
             enable_outlier=self.enable_outlier,
             enable_residual=self.enable_residual,
-            enbale_perm=self.enable_perm,
+            enable_perm=self.enable_perm,
             enable_norm=self.enable_norm,
             num_centroids=self.num_centroids,
             num_centroids_outlier=self.num_outlier_centroids,

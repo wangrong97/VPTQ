@@ -195,5 +195,7 @@ class AutoModelForCausalLM(transformers.AutoModelForCausalLM):
 
         model.eval()
 
-        torch.cuda.empty_cache()
+        from vptq.utils.device import empty_cache
+
+        empty_cache()
         return model

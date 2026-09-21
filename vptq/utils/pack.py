@@ -408,7 +408,9 @@ def absorb_perm(model):
             pbar.set_postfix_str(f"Processing {name}")
             with accelerate.utils.align_module_device(module):
                 absorbed_perm = absorb_perm_layer(module)
-            torch.cuda.empty_cache()
+            from vptq.utils.device import empty_cache
+
+            empty_cache()
 
     # update config
     if absorbed_perm:
